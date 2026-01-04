@@ -64,7 +64,7 @@ if _G.FastAttack then
 
     local Settings = {
         AutoClick = true,
-        ClickDelay = 00,1
+        ClickDelay = 0,1
     }
 
     local Module = {}
@@ -124,7 +124,7 @@ if _G.FastAttack then
             if Equipped and Equipped.ToolTip ~= "Gun" then
                 self:AttackNearest()
             else
-                task.wait(0)
+                task.wait(0.1)
             end
         end
 
