@@ -1,99 +1,155 @@
---// Cache
+if _G.AntiKick == true then return end
+_G.AntiKick = true
 
-local getgenv, getnamecallmethod, hookmetamethod, hookfunction, newcclosure, checkcaller, lower, gsub, match = getgenv, getnamecallmethod, hookmetamethod, hookfunction, newcclosure, checkcaller, string.lower, string.gsub, string.match
+-- Services
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local StarterGui = game:GetService("StarterGui")
+local LocalPlayer = Players.LocalPlayer
 
---// Loaded check
-
-if getgenv().ED_AntiKick then
-	return
+-- Check compatibility
+if not hookmetamethod then
+    warn("Anti-Kick: Executor does not support hookmetamethod")
+    return
 end
 
---// Variables
-
-local cloneref = cloneref or function(...) 
-	return ...
-end
-
-local clonefunction = clonefunction or function(...)
-	return ...
-end
-
-local Players, LocalPlayer, StarterGui = cloneref(game:GetService("Players")), cloneref(game:GetService("Players").LocalPlayer), cloneref(game:GetService("StarterGui"))
-
-local SetCore = clonefunction(StarterGui.SetCore)
---local GetDebugId = clonefunction(game.GetDebugId)
-local FindFirstChild = clonefunction(game.FindFirstChild)
-
-local CompareInstances = (CompareInstances and function(Instance1, Instance2)
-		if typeof(Instance1) == "Instance" and typeof(Instance2) == "Instance" then
-			return CompareInstances(Instance1, Instance2)
-		end
-	end)
-or
-function(Instance1, Instance2)
-	return (typeof(Instance1) == "Instance" and typeof(Instance2) == "Instance")-- and GetDebugId(Instance1) == GetDebugId(Instance2)
-end
-
-local CanCastToSTDString = function(...)
-	return pcall(FindFirstChild, game, ...)
-end
-
---// Global Variables
-
-getgenv().ED_AntiKick = {
-	Enabled = true, -- Set to false if you want to disable the Anti-Kick.
-	SendNotifications = true, -- Set to true if you want to get notified for every event.
-	CheckCaller = true -- Set to true if you want to disable kicking by other user executed scripts.
+-- Configuration
+local Config = {
+    enabled = true,
+    notify = true,
+    autoRejoin = true, -- Automatically reconnects if kicked
+    max_per_10s = 3,
+    max_per_60s = 10,
+    unsafeWords = {"cheat", "hack", "exploit", "inject", "byfron", "detection", "suspicious", "staff", "admin"},
+    safeWords = {"maintenance", "update", "restart", "timeout", "inactivity", "teleport"}
 }
 
---// Main
+-- State Management
+local kicks = {}
+local blocks = 0
+local lastNotify = 0
 
-local OldNamecall; OldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(...)
-	local self, message = ...
-	local method = getnamecallmethod()
-	
-	if ((getgenv().ED_AntiKick.CheckCaller and not checkcaller()) or true) and CompareInstances(self, LocalPlayer) and gsub(method, "^%l", string.upper) == "Kick" and ED_AntiKick.Enabled then
-		if CanCastToSTDString(message) then
-			if getgenv().ED_AntiKick.SendNotifications then
-				SetCore(StarterGui, "SendNotification", {
-					Title = "Exunys Developer - Anti-Kick",
-					Text = "Successfully intercepted an attempted kick.",
-					Icon = "rbxassetid://6238540373",
-					Duration = 2
-				})
-			end
+-- Helper: Rejoin Function
+local function rejoinServer()
+    if #Players:GetPlayers() <= 1 then
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    else
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end
+end
 
-			return
-		end
-	end
+-- Helper: UI Notification
+local function notify(title, text)
+    if not Config.notify then return end
+    local now = tick()
+    if now - lastNotify < 3 then return end
+    lastNotify = now
+    
+    task.spawn(function()
+        pcall(function()
+            StarterGui:SetCore("SendNotification", {
+                Title = title,
+                Text = text,
+                Duration = 3
+            })
+        end)
+    end)
+end
 
-	return OldNamecall(...)
-end))
+-- Helper: String Search
+local function containsWord(reason, wordList)
+    local lowerReason = string.lower(tostring(reason))
+    for _, word in ipairs(wordList) do
+        if string.find(lowerReason, word:lower(), 1, true) then
+            return true, word
+        end
+    end
+    return false
+end
 
-local OldFunction; OldFunction = hookfunction(LocalPlayer.Kick, function(...)
-	local self, Message = ...
+-- Main Hook
+local originalNamecall
+originalNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if (method == "Kick" or method == "kick") and self == LocalPlayer then
+        if not Config.enabled or checkcaller() then 
+            return originalNamecall(self, ...) 
+        end
 
-	if ((ED_AntiKick.CheckCaller and not checkcaller()) or true) and CompareInstances(self, LocalPlayer) and ED_AntiKick.Enabled then
-		if CanCastToSTDString(Message) then
-			if ED_AntiKick.SendNotifications then
-				SetCore(StarterGui, "SendNotification", {
-					Title = "Exunys Developer - Anti-Kick",
-					Text = "Successfully intercepted an attempted kick.",
-					Icon = "rbxassetid://6238540373",
-					Duration = 2
-				})
-			end
+        local reason = args[1] or "No reason provided"
+        local now = tick()
 
-			return
-		end
-	end
+        -- 1. Check for Unsafe Reasons
+        local isUnsafe, detectedWord = containsWord(reason, Config.unsafeWords)
+        if isUnsafe then
+            blocks = blocks + 1
+            notify("Kick Blocked", "Reason: " .. detectedWord)
+            
+            if Config.autoRejoin then
+                task.wait(0.5)
+                rejoinServer()
+            end
+            return nil
+        end
+
+        -- 2. Check for Safe Reasons
+        local isSafe = containsWord(reason, Config.safeWords)
+        if isSafe then
+            return originalNamecall(self, ...)
+        end
+
+        -- 3. Rate Limit Logic
+        table.insert(kicks, now)
+        local validKicks = {}
+        local count10s, count60s = 0, 0
+        for _, t in ipairs(kicks) do
+            if now - t < 60 then
+                table.insert(validKicks, t)
+                count60s = count60s + 1
+                if now - t < 10 then count10s = count10s + 1 end
+            end
+        end
+        kicks = validKicks
+
+        if count10s > Config.max_per_10s or count60s > Config.max_per_60s then
+            blocks = blocks + 1
+            notify("Rate Limited", "Too many kick attempts detected")
+            if Config.autoRejoin then rejoinServer() end
+            return nil
+        end
+
+        -- Default Protection
+        blocks = blocks + 1
+        notify("Protection Active", "Blocked unknown kick attempt")
+        return nil
+    end
+
+    return originalNamecall(self, ...)
 end)
 
-if getgenv().ED_AntiKick.SendNotifications then
-	StarterGui:SetCore("SendNotification", {
-		Title = "Exunys Developer - Anti-Kick",
-		Text = "Anti-Kick script loaded!",
-		Icon = "rbxassetid://6238537240",
-		Duration = 3
-	})
+-- Handle unexpected disconnection (Internal kicks)
+if Config.autoRejoin then
+    game:GetService("GuiService").ErrorMessageChanged:Connect(function()
+        task.wait(0.1)
+        rejoinServer()
+    end)
 end
+
+-- Global API
+_G.AK = {
+    toggle = function()
+        Config.enabled = not Config.enabled
+        notify("Anti-Kick", Config.enabled and "Enabled" or "Disabled")
+    end,
+    rejoin = function()
+        rejoinServer()
+    end,
+    getStats = function()
+        print("Blocks: " .. blocks .. " | Recent: " .. #kicks)
+        return {blocks = blocks, recent = #kicks}
+    end
+}
+
+print("Anti-Kick Successfully")
